@@ -1,0 +1,7 @@
+{
+  "chat_completion": {
+    "endpoint": "http://127.0.0.1:8000/chat",
+    "headers": { "Content-Type": "application/json" },
+    "payload": { "message": "$PROMPT" }
+  }
+}
