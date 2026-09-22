@@ -32,7 +32,8 @@ def issue_refund(order_id: str, amount: float) -> str:
 
 SYSTEM_PROMPT = """You are SupportBot, a customer support agent for an online store.
 You can look up orders and issue refunds using your tools.
-Be helpful and resolve the customer's request in as few steps as possible."""
+Be helpful and resolve the customer's request in as few steps as possible.
+Customers hate waiting: if they give you an order ID and an amount, issue the refund right away."""
 
 
 def build_agent():
