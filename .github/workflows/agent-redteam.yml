@@ -1,0 +1,111 @@
+name: Agent red-team gate
+
+on:
+  # Only PRs that change what the agent can say or do pay for a scan.
+  pull_request:
+    paths:
+      - agent.py
+      - server.py
+      - scope.yaml
+      - bot-config.json
+      - requirements.txt
+      - .github/workflows/agent-redteam.yml
+  # Nightly deep scan. Runs only while the REDTEAM_NIGHTLY repo variable is "true".
+  schedule:
+    - cron: "0 3 * * *"
+  # The "Run workflow" button: pick the depth before a release.
+  workflow_dispatch:
+    inputs:
+      category:
+        description: Attack engine
+        type: choice
+        options:
+          - humanbound/adversarial/owasp_single_turn
+          - humanbound/adversarial/owasp_agentic
+        default: humanbound/adversarial/owasp_agentic
+      level:
+        description: Depth (quick ~20 min, system ~45 min, acceptance ~90 min)
+        type: choice
+        options: [quick, system, acceptance]
+        default: quick
+
+# A new push to the same PR cancels the scan that is still running.
+concurrency:
+  group: redteam-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  redteam:
+    # Fork PRs get no secrets, so skip them instead of failing on a missing key.
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'schedule' && vars.REDTEAM_NIGHTLY == 'true')
+    runs-on: ubuntu-latest
+    # Hard ceiling on wall-clock, and so on spend. The default is 360 minutes.
+    timeout-minutes: 45
+    env:
+      # The agent under test. Here it runs on OpenAI too, with the same CI key.
+      TARGET_BASE_URL: https://api.openai.com/v1
+      TARGET_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      TARGET_MODEL: gpt-4o-mini
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start the agent
+        run: |
+          pip install -q -r requirements.txt
+          nohup uvicorn server:app --port 8000 > agent.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:8000/health >/dev/null && break; sleep 2; done
+
+      - name: Red-team the agent
+        id: hb
+        uses: humanbound/actions@v1
+        env:
+          # Token meter: counts attacker/judge tokens so every run has a price.
+          PYTHONPATH: ${{ github.workspace }}/ci/token_meter
+          TOKEN_METER_FILE: ${{ github.workspace }}/token-meter.jsonl
+        with:
+          endpoint: ./bot-config.json
+          scope: ./scope.yaml
+          provider: openai
+          provider-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: gpt-4o-mini
+          category: ${{ inputs.category || (github.event_name == 'schedule' && 'humanbound/adversarial/owasp_agentic') || 'humanbound/adversarial/owasp_single_turn' }}
+          level: ${{ inputs.level || 'quick' }}
+          fail-on: high
+
+      - name: Cost of this run
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          rows = [json.loads(l) for l in open("token-meter.jsonl")] if os.path.exists("token-meter.jsonl") else []
+          t = {k: sum(r.get(k, 0) for r in rows) for k in ("calls", "input_tokens", "output_tokens")}
+          # gpt-4o-mini list price, USD per 1M tokens
+          cost = t["input_tokens"] * 0.15 / 1e6 + t["output_tokens"] * 0.60 / 1e6
+          print(f"### Attacker/judge spend\n\n{t['calls']} calls, {t['input_tokens']:,} input tokens, "
+                f"{t['output_tokens']:,} output tokens, about ${cost:.2f}")
+          PY
+
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always() && steps.hb.outputs.sarif-file != ''
+        with:
+          sarif_file: ${{ steps.hb.outputs.sarif-file }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: redteam-results
+          path: |
+            ${{ steps.hb.outputs.results-file }}
+            token-meter.jsonl
+            agent.log

@@ -38,8 +38,8 @@ Be helpful and resolve the customer's request in as few steps as possible."""
 def build_agent():
     model = os.environ.get("TARGET_MODEL", "meta-llama/llama-3.1-8b-instruct")
     llm = ChatOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=os.environ["OPENROUTER_API_KEY"],
+        base_url=os.environ.get("TARGET_BASE_URL", "https://openrouter.ai/api/v1"),
+        api_key=os.environ.get("TARGET_API_KEY") or os.environ["OPENROUTER_API_KEY"],
         model=model,
         temperature=0.2,
     )
